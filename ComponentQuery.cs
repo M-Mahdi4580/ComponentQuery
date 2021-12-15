@@ -263,7 +263,7 @@ namespace Utility
 			/// <summary>
 			/// Clears the query results from the shared backing buffer.
 			/// </summary>
-			/// <remarks>This method should be called to prevent unbounded growth of the shared backing buffer.</remarks>
+			/// <remarks>This method should be called consistently to prevent unbounded growth of the shared backing buffer and invalid behaviours.</remarks>
 			public void Dispose() => MainBuffer.RemoveRange(_SharedIndex, Length);
 		}
 	}
