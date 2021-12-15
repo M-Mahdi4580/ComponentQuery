@@ -12,97 +12,87 @@ namespace Utility
 	public enum TreeRange
 	{
 		/// <summary>
-		/// Reference node
+		/// The reference node.
 		/// </summary>
 		Self = 1,
 
 		/// <summary>
-		/// Siblings of the reference node
+		/// Siblings of the reference node.
 		/// </summary>
 		Siblings = 2,
 
 		/// <summary>
-		/// Immediate parent of the reference node
+		/// Immediate parent of the reference node.
 		/// </summary>
 		Parent = 4,
 
 		/// <summary>
-		/// Ancestors of the reference node
+		/// Ancestors of the reference node.
 		/// </summary>
 		GrandParents = 8,
 
 		/// <summary>
-		/// Immediate children of the reference node
+		/// Immediate children of the reference node.
 		/// </summary>
 		Children = 16,
 
 		/// <summary>
-		/// Descendants of the reference node
+		/// Descendants of the reference node.
 		/// </summary>
 		GrandChildren = 32
 	}
 
-	/// <summary>
-	/// Groups the component buffers used while querying components.
-	/// </summary>
-	public readonly ref struct QueryBufferPair
-	{
-		/// <summary>
-		/// A buffer for storing the results
-		/// </summary>
-		public readonly List<Component> MainBuffer;
-
-		/// <summary>
-		/// A buffer for computing the results
-		/// </summary>
-		public readonly List<Component> TempBuffer;
-
-		public QueryBufferPair(List<Component> mainBuffer, List<Component> tempBuffer)
-		{
-			MainBuffer = mainBuffer;
-			TempBuffer = tempBuffer;
-		}
-	}
 
 	/// <summary>
 	/// Represents a enumerable query of components.
 	/// </summary>
-	/// <typeparam name="T">Type of the components to query for</typeparam>
+	/// <typeparam name="T">Type of the components to query for.</typeparam>
 	public readonly struct ComponentQuery<T> : IEnumerable<T> where T : class
 	{
-		/// <summary>
-		/// Origin of the query
-		/// </summary>
-		public readonly GameObject Target;
+		private static readonly List<Component> MainBuffer = new List<Component>(32); // Used for storing query results.
+		private static readonly List<Component> TempBuffer = new List<Component>(8); // Used for computing query results.
+
 
 		/// <summary>
-		/// Range of the query relative to the origin
+		/// Reference node of the query.
+		/// </summary>
+		public readonly GameObject Node;
+
+		/// <summary>
+		/// Range of the query relative to the reference node.
 		/// </summary>
 		public readonly TreeRange Range;
 
 		/// <summary>
-		/// Maximum number of successful queries allowed in the range
+		/// Maximum number of nodes the query can match.
 		/// </summary>
-		public readonly int Capacity;
+		public readonly int RangeCapacity;
 
 		/// <summary>
-		/// Constructs a new query.
+		/// Maximum number of components each node can match.
 		/// </summary>
-		/// <param name="target">Origin of the query</param>
-		/// <param name="range">Range of the query relative to the origin</param>
-		/// <param name="capacity">Maximum number of successful queries allowed in the range</param>
-		/// <inheritdoc cref="ComponentQuery{T}"/>
-		public ComponentQuery(GameObject target, TreeRange range, int capacity)
+		public readonly int NodeCapacity;
+
+		/// <summary>
+		/// Initializes a new query with the given parameters.
+		/// </summary>
+		/// <param name="node">Reference node of the query.</param>
+		/// <param name="range">Range of the query relative to the reference node.</param>
+		/// <param name="rangeCapacity">Maximum number of nodes the query can match.</param>
+		/// <param name="nodeCapacity">Maximum number of components each node can match.</param>
+		public ComponentQuery(GameObject node, TreeRange range, int rangeCapacity, int nodeCapacity)
 		{
-			Target = target;
+			Node = node;
 			Range = range;
-			Capacity = capacity;
+			RangeCapacity = rangeCapacity;
+			NodeCapacity = nodeCapacity;
 		}
+
 
 		/// <summary>
 		/// Retrieves the results of the query as an array.
 		/// </summary>
-		/// <returns>Query results</returns>
+		/// <returns>An array containing the query results.</returns>
 		public T[] ToArray()
 		{
 			using Enumerator enumerator = GetEnumerator();
@@ -119,51 +109,150 @@ namespace Utility
 		}
 
 		/// <summary>
-		/// Performs the query.
+		/// Retrieves the results of the query.
 		/// </summary>
-		/// <returns>Query results enumerator</returns>
+		/// <returns>An enumerator for iterating the results.</returns>
 		public Enumerator GetEnumerator()
 		{
-			int startIndex = Utils.MainComponentBuffer.Count;
-			Target.GetComponents<T>(Range, new QueryBufferPair(Utils.MainComponentBuffer, Utils.TempComponentBuffer), Capacity);
+			int sharedIndex = MainBuffer.Count; // Stores the start index of the query results in the shared buffer.
+			int rangeCapacity = RangeCapacity; // Keeps track of the number of matched nodes.
 
-			return new Enumerator(startIndex, Utils.MainComponentBuffer.Count - startIndex);
+			Transform current = Node.transform;
+			Transform parent = current.parent;
+
+			if (Range.HasFlag(TreeRange.Self))
+			{
+				Query(current, ref rangeCapacity, NodeCapacity);
+			}
+
+			if (!ReferenceEquals(parent, null))
+			{
+				if (Range.HasFlag(TreeRange.Siblings))
+				{
+					for (int i = 0, len = parent.childCount; i < len && rangeCapacity > 0; i++)
+					{
+						Transform child = parent.GetChild(i);
+
+						if (!ReferenceEquals(child, current))
+						{
+							Query(child, ref rangeCapacity, NodeCapacity);
+						}
+					}
+				}
+
+				if (Range.HasFlag(TreeRange.Parent))
+				{
+					Query(parent, ref rangeCapacity, NodeCapacity);
+				}
+
+				if (Range.HasFlag(TreeRange.GrandParents))
+				{
+					QueryParents(parent, ref rangeCapacity, NodeCapacity);
+				}
+			}
+
+			if (Range.HasFlag(TreeRange.Children) || Range.HasFlag(TreeRange.GrandChildren))
+			{
+				for (int i = 0, len = current.childCount; i < len && rangeCapacity > 0; i++)
+				{
+					Transform child = current.GetChild(i);
+
+					if (Range.HasFlag(TreeRange.Children))
+					{
+						Query(child, ref rangeCapacity, NodeCapacity);
+					}
+
+					if (Range.HasFlag(TreeRange.GrandChildren))
+					{
+						for (int j = 0, childLen = child.childCount; j < childLen && rangeCapacity > 0; j++)
+						{
+							QueryChildrenRecursive(child.GetChild(j), ref rangeCapacity, NodeCapacity);
+						}
+					}
+				}
+			}
+
+			return new Enumerator(sharedIndex, MainBuffer.Count - sharedIndex);
+
+
+			static void Query(Transform node, ref int rangeCapacity, int nodeCapacity)
+			{
+				if (rangeCapacity > 0)
+				{
+					node.GetComponents(TempBuffer);
+					int capacity = nodeCapacity;
+
+					for (int i = 0, len = TempBuffer.Count; i < len && capacity > 0; i++)
+					{
+						Component component = TempBuffer[i];
+
+						if (component is T)
+						{
+							MainBuffer.Add(component);
+							capacity--;
+						}
+					}
+
+					if (capacity != nodeCapacity) // If the node is matched
+					{
+						rangeCapacity--; // Update the range capacity.
+					}
+				}
+			}
+
+			static void QueryParents(Transform node, ref int rangeCapacity, int nodeCapacity)
+			{
+				while (!ReferenceEquals(node = node.parent, null) && rangeCapacity > 0)
+				{
+					Query(node, ref rangeCapacity, nodeCapacity);
+				}
+			}
+
+			static void QueryChildrenRecursive(Transform node, ref int rangeCapacity, int nodeCapacity)
+			{
+				Query(node, ref rangeCapacity, nodeCapacity);
+
+				for (int i = 0, len = node.childCount; i < len && rangeCapacity > 0; i++)
+				{
+					QueryChildrenRecursive(node.GetChild(i), ref rangeCapacity, nodeCapacity);
+				}
+			}
 		}
 
 		IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
 		IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
 		/// <summary>
-		/// Iterates the matched components in a query.
+		/// Iterates the matched components of a query.
 		/// </summary>
-		/// <remarks>Please avoid copying these enumerators. Due to the usage of a shared backing buffer, disposal of one copy of the enumerator, affects all other copies and results in unexpected behaviours.</remarks>
+		/// <remarks>Copying these enumerators should be avoided. Due to the usage of a shared backing buffer, disposal of one copy, affects all other copies and results in unexpected behaviours.</remarks>
 		public struct Enumerator : IEnumerator<T>
 		{
-			private int _index; // Current index
-			private readonly int _StartIndex; // The index of the first matched component in the shared buffer
+			private readonly int _SharedIndex; // Index of the first matched component in the shared buffer.
+			private int _index; // Index of the current matched component.
 
 			/// <summary>
-			/// Number of components
+			/// Number of matches.
 			/// </summary>
 			public readonly int Length;
 
-			public Enumerator(int listStartIndex, int length)
+			internal Enumerator(int sharedIndex, int length)
 			{
-				_StartIndex = listStartIndex;
+				_SharedIndex = sharedIndex;
 				_index = -1;
 				Length = length;
 			}
 
 			/// <summary>
-			/// Current component
+			/// Current match.
 			/// </summary>
-			public T Current => Utils.MainComponentBuffer[_StartIndex + _index] as T;
+			public T Current => MainBuffer[_SharedIndex + _index] as T;
 			object IEnumerator.Current => Current;
 
 			/// <summary>
-			/// Advances to the next component.
+			/// Advances to the next match.
 			/// </summary>
-			/// <returns>True if any more component is available, false otherwise</returns>
+			/// <returns>True if there are any more matches available; false otherwise.</returns>
 			public bool MoveNext() => ++_index < Length;
 
 			/// <summary>
@@ -172,10 +261,10 @@ namespace Utility
 			public void Reset() => _index = -1;
 
 			/// <summary>
-			/// Clears the shared backing buffer.
+			/// Clears the query results from the shared backing buffer.
 			/// </summary>
-			/// <remarks>Failure to call this method will result in misbehaviours and unexpected results.</remarks>
-			public void Dispose() => Utils.MainComponentBuffer.RemoveRange(_StartIndex, Length);
+			/// <remarks>This method should be called to prevent unbounded growth of the shared backing buffer.</remarks>
+			public void Dispose() => MainBuffer.RemoveRange(_SharedIndex, Length);
 		}
 	}
 
@@ -183,142 +272,27 @@ namespace Utility
 	public static partial class Utils
 	{
 		/// <summary>
-		/// A large component buffer used to store long-term results.
-		/// </summary>
-		public static readonly List<Component> MainComponentBuffer = new List<Component>(32); // Main buffer for holding results from component queries.
-
-		/// <summary>
-		/// An small component buffer used to store temporary results.
-		/// </summary>
-		public static readonly List<Component> TempComponentBuffer = new List<Component>(8); // A buffer for holding temporary data from component query processings.
-
-
-		/// <inheritdoc cref="GetComponent{T}(GameObject, TreeRange)"/>
-		public static T GetComponent<T>(this Component target, TreeRange range) where T : class => GetComponent<T>(target.gameObject, range);
-
-		/// <summary>
 		/// Retrieves the first component matching the query.
 		/// </summary>
-		/// <inheritdoc cref="ComponentQuery{T}.ComponentQuery(GameObject, TreeRange, int)"/>
-		/// <returns>The matched component if any, null otherwise</returns>
-		public static T GetComponent<T>(this GameObject target, TreeRange range) where T : class
+		/// <typeparam name="T">Type of the component to query for.</typeparam>
+		/// <returns>The matched component if any; null otherwise.</returns>
+		/// <inheritdoc cref="ComponentQuery{T}.ComponentQuery(GameObject, TreeRange, int, int)"/>
+		public static T GetComponent<T>(this GameObject node, TreeRange range) where T : class
 		{
-			using (var enumerator = new ComponentQuery<T>(target, range, 1).GetEnumerator())
+			using (var enumerator = new ComponentQuery<T>(node, range, 1, 1).GetEnumerator())
 			{
 				return enumerator.MoveNext() ? enumerator.Current : null;
 			}
 		}
 
-		/// <inheritdoc cref="GetComponents{T}(GameObject, TreeRange, int)"/>
-		public static ComponentQuery<T> GetComponents<T>(this Component target, TreeRange range, int capacity = int.MaxValue) where T : class => GetComponents<T>(target.gameObject, range, capacity);
+		/// <inheritdoc cref="GetComponent{T}(GameObject, TreeRange)"/>
+		public static T GetComponent<T>(this Component node, TreeRange range) where T : class => GetComponent<T>(node.gameObject, range);
 
-		/// <inheritdoc cref="ComponentQuery{T}.ComponentQuery(GameObject, TreeRange, int)"/>
-		public static ComponentQuery<T> GetComponents<T>(this GameObject target, TreeRange range, int capacity = int.MaxValue) where T : class => new ComponentQuery<T>(target, range, capacity);
+		/// <typeparam name="T">Type of the components to query for.</typeparam>
+		/// <inheritdoc cref="ComponentQuery{T}.ComponentQuery(GameObject, TreeRange, int, int)"/>
+		public static ComponentQuery<T> GetComponents<T>(this GameObject node, TreeRange range, int rangeCapacity = int.MaxValue, int nodeCapacity = int.MaxValue) where T : class => new ComponentQuery<T>(node, range, rangeCapacity, nodeCapacity);
 
-		/// <summary>
-		/// Performs a component query.
-		/// </summary>
-		/// <param name="buffers">The buffers to use for storing the results</param>
-		/// <inheritdoc cref="ComponentQuery{T}.ComponentQuery(GameObject, TreeRange, int)"/>
-		public static void GetComponents<T>(this GameObject target, TreeRange range, in QueryBufferPair buffers, int capacity = int.MaxValue) where T : class
-		{
-			Transform current = target.transform, parent = current.parent;
-
-			if (range.HasFlag(TreeRange.Self))
-			{
-				Query(current, ref capacity, in buffers);
-			}
-
-			if (!ReferenceEquals(parent, null))
-			{
-				if (range.HasFlag(TreeRange.Siblings))
-				{
-					for (int i = 0, len = parent.childCount; i < len && capacity > 0; i++)
-					{
-						Transform child = parent.GetChild(i);
-
-						if (!ReferenceEquals(child, current))
-						{
-							Query(child, ref capacity, in buffers);
-						}
-					}
-				}
-
-				if (range.HasFlag(TreeRange.Parent))
-				{
-					Query(parent, ref capacity, in buffers);
-				}
-
-				if (range.HasFlag(TreeRange.GrandParents))
-				{
-					QueryParents(parent, ref capacity, in buffers);
-				}
-			}
-
-			if (range.HasFlag(TreeRange.Children) || range.HasFlag(TreeRange.GrandChildren))
-			{
-				for (int i = 0, len = current.childCount; i < len && capacity > 0; i++)
-				{
-					Transform child = current.GetChild(i);
-
-					if (range.HasFlag(TreeRange.Children))
-					{
-						Query(child, ref capacity, in buffers);
-					}
-
-					if (range.HasFlag(TreeRange.GrandChildren))
-					{
-						for (int j = 0, childLen = child.childCount; j < childLen && capacity > 0; j++)
-						{
-							QueryDepthRecursive(child.GetChild(j), ref capacity, in buffers);
-						}
-					}
-				}
-			}
-
-
-			static void Query(Transform target, ref int capacity, in QueryBufferPair buffers)
-			{
-				if (capacity > 0)
-				{
-					target.GetComponents(buffers.TempBuffer);
-					bool querySucceeded = false;
-
-					for (int i = 0, len = buffers.TempBuffer.Count; i < len; i++)
-					{
-						Component component = buffers.TempBuffer[i];
-
-						if (component is T)
-						{
-							buffers.MainBuffer.Add(component);
-							querySucceeded = true;
-						}
-					}
-
-					if (querySucceeded)
-					{
-						capacity--;
-					}
-				}
-			}
-
-			static void QueryParents(Transform target, ref int capacity, in QueryBufferPair buffers)
-			{
-				while (!ReferenceEquals(target = target.parent, null) && capacity > 0)
-				{
-					Query(target, ref capacity, in buffers);
-				}
-			}
-
-			static void QueryDepthRecursive(Transform target, ref int capacity, in QueryBufferPair buffers)
-			{
-				Query(target, ref capacity, in buffers);
-
-				for (int i = 0, len = target.childCount; i < len && capacity > 0; i++)
-				{
-					QueryDepthRecursive(target.GetChild(i), ref capacity, in buffers);
-				}
-			}
-		}
+		/// <inheritdoc cref="GetComponents{T}(GameObject, TreeRange, int, int)"/>
+		public static ComponentQuery<T> GetComponents<T>(this Component node, TreeRange range, int rangeCapacity = int.MaxValue, int nodeCapacity = int.MaxValue) where T : class => new ComponentQuery<T>(node.gameObject, range, rangeCapacity, nodeCapacity);
 	}
 }
